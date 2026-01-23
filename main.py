@@ -159,6 +159,7 @@ import time
 import random
 import pandas as pd
 import concurrent.futures
+import google.generativeai as genai
 from datetime import datetime
 from dateutil import parser as date_parser 
 from config import Config
@@ -177,6 +178,8 @@ def normalize_date(date_str):
         return date_str
 
 def parse_smart_date(folder_name):
+    # Regex looks for at least 3 letters (Month) and 2-4 digits (Year)
+    # e.g. "January 2025", "Jan 25", "Invoices Dec 2024"
     match = re.search(r'([a-zA-Z]{3,})[^0-9]*(\d{2,4})', folder_name)
     if not match: return None
     month, year = match.groups()
@@ -195,16 +198,19 @@ def parse_filename_metadata(filename):
         return clean_name, ""
 
 # --- WORKER: PO INVOICES ---
-def process_po_invoice(pdf_info, memory):
-    if memory.is_processed(pdf_info['id']): return None
+def process_po_invoice(pdf_info):
+    db = HistoryDB(Config.DB_FILE)
+    if db.is_processed(pdf_info['id']): 
+        db.close()
+        return None
+    db.close()
+
     time.sleep(random.uniform(0.5, 1.5))
-    
     print(f"  [PO] Processing: {pdf_info['name']}")
     temp_path = f"temp_po_{pdf_info['id']}.pdf"
     
     try:
         local_drive = DriveTool(Config) 
-        # 🔧 FIX: Pass API Key here
         local_ai = InvoiceExtractor(Config.GEMINI_API_KEY) 
 
         pdf_bytes = local_drive.download_pdf(pdf_info['id'])
@@ -212,15 +218,15 @@ def process_po_invoice(pdf_info, memory):
         
         data = local_ai.process_file(temp_path) 
         
-        # Guard against List vs Dict return
-        if isinstance(data, list):
-            data = data[0] if data else {}
+        if isinstance(data, list): data = data[0] if data else {}
 
         pos = data.get('po_numbers', [])
         if isinstance(pos, str): pos = [pos]
         if not pos: pos = []
 
-        memory.log_success(pdf_info['id'])
+        db = HistoryDB(Config.DB_FILE)
+        db.log_success(pdf_info['id'])
+        db.close()
         
         return {
             'Document Date': normalize_date(data.get('invoice_date')),
@@ -240,16 +246,19 @@ def process_po_invoice(pdf_info, memory):
         if os.path.exists(temp_path): os.remove(temp_path)
 
 # --- WORKER: NON-PO INVOICES ---
-def process_non_po_invoice(pdf_info, memory):
-    if memory.is_processed(pdf_info['id']): return None
+def process_non_po_invoice(pdf_info):
+    db = HistoryDB(Config.DB_FILE)
+    if db.is_processed(pdf_info['id']): 
+        db.close()
+        return None
+    db.close()
+
     time.sleep(random.uniform(0.5, 1.5))
-    
     print(f"  [Non-PO] Processing: {pdf_info['name']}")
     temp_path = f"temp_npo_{pdf_info['id']}.pdf"
     
     try:
         local_drive = DriveTool(Config) 
-        # 🔧 FIX: Pass API Key here
         local_ai = InvoiceExtractor(Config.GEMINI_API_KEY)
 
         vendor_no, cost_center = parse_filename_metadata(pdf_info['name'])
@@ -258,12 +267,13 @@ def process_non_po_invoice(pdf_info, memory):
         
         data = local_ai.process_non_po_file(temp_path) 
         
-        # Guard against List vs Dict return
-        if isinstance(data, list):
-            data = data[0] if data else {}
+        if isinstance(data, list): data = data[0] if data else {}
 
-        memory.log_success(pdf_info['id'])
+        db = HistoryDB(Config.DB_FILE)
+        db.log_success(pdf_info['id'])
+        db.close()
         
+        # ADDED 'Document Link' HERE
         return {
             'Vendor No': vendor_no,
             'Inv Date': normalize_date(data.get('invoice_date')),
@@ -273,7 +283,8 @@ def process_non_po_invoice(pdf_info, memory):
             'Item text': data.get('header_text'),
             'Cost center': cost_center,
             'HSN/SAC': data.get('hsn_sac'),
-            'With Holding tax Base Amount': data.get('withholding_tax_base')
+            'With Holding tax Base Amount': data.get('withholding_tax_base'),
+            'Document Link': pdf_info.get('webViewLink')
         }
     except Exception as e:
         print(f"  ❌ Error on {pdf_info['name']}: {e}")
@@ -281,12 +292,81 @@ def process_non_po_invoice(pdf_info, memory):
     finally:
         if os.path.exists(temp_path): os.remove(temp_path)
 
+# --- SMART SCANNER ---
+def scan_and_process(drive_tool, root_id, worker_func, results_list):
+    """
+    Intelligently scans for folders.
+    Strategy 1: Check if root contains Date Folders (e.g., 'Jan 2025').
+    Strategy 2: Check if root contains Regions -> Date Folders.
+    """
+    try:
+        root_subs = drive_tool.list_files(root_id, "application/vnd.google-apps.folder")
+        if not root_subs:
+            print("     (Folder is empty)")
+            return
+
+        # Check for Strategy 1 (Direct Date Folders)
+        date_folders = [f for f in root_subs if parse_smart_date(f['name'])]
+        
+        targets = []
+        
+        if date_folders:
+            print(f"     👉 Detected Simple Structure (Found {len(date_folders)} date folders)")
+            # Sort newest first
+            targets.append(sorted(date_folders, key=lambda x: parse_smart_date(x['name']), reverse=True)[0])
+        else:
+            print("     👉 Checking for Region Structure (e.g. Region -> Date Folder)...")
+            for region in root_subs:
+                sub_subs = drive_tool.list_files(region['id'], "application/vnd.google-apps.folder")
+                valid_dates = [s for s in sub_subs if parse_smart_date(s['name'])]
+                if valid_dates:
+                    best_sub = sorted(valid_dates, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
+                    # Rename for clarity in logs
+                    best_sub['name'] = f"{region['name']}/{best_sub['name']}"
+                    targets.append(best_sub)
+                else:
+                    print(f"        ⚠️ Skipped '{region['name']}': No date subfolders (e.g. 'Jan 2025') found inside.")
+
+        if not targets:
+            print("     ❌ No valid 'Month Year' folders found. Please create a folder like 'January 2025'.")
+            return
+
+        # Process identified targets
+        for target in targets:
+            print(f"     📍 Scanning: {target['name']}")
+            pdfs = drive_tool.list_files(target['id'], "application/pdf")
+            
+            if not pdfs:
+                print("        (No PDFs found)")
+                continue
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+                futures = [ex.submit(worker_func, p) for p in pdfs]
+                for f in concurrent.futures.as_completed(futures):
+                    if res := f.result(): results_list.append(res)
+
+    except Exception as e:
+        print(f"❌ Scan Error: {e}")
+
 # --- MAIN ---
 def main():
     print("🤖 Agent Starting...")
+    
+    if not Config.GEMINI_API_KEY:
+        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+        return
+    
+    genai.configure(api_key=Config.GEMINI_API_KEY)
+    
+    try:
+        init_db = HistoryDB(Config.DB_FILE)
+        init_db.close()
+    except Exception as e:
+        print(f"❌ DB Init Failed: {e}")
+        return
+
     try:
         master_drive = DriveTool(Config)
-        memory = HistoryDB(Config.DB_FILE)
         email = EmailSender(Config) 
     except Exception as e:
         print(f"❌ Init Failed: {e}")
@@ -298,43 +378,14 @@ def main():
     # === CYCLE 1: PO INVOICES ===
     if Config.ROOT_FOLDER_ID:
         print(f"\n📂 Scanning PO Folders (ID: {Config.ROOT_FOLDER_ID})...")
-        try:
-            regions = master_drive.list_files(Config.ROOT_FOLDER_ID, "application/vnd.google-apps.folder")
-            for region in regions:
-                sub = master_drive.list_files(region['id'], "application/vnd.google-apps.folder")
-                valid = [s for s in sub if parse_smart_date(s['name'])]
-                if not valid: continue
-                target = sorted(valid, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
-                
-                pdfs = master_drive.list_files(target['id'], "application/pdf")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-                    futures = [ex.submit(process_po_invoice, p, memory) for p in pdfs]
-                    for f in concurrent.futures.as_completed(futures):
-                        if res := f.result(): po_results.append(res)
-        except Exception as e:
-            print(f"❌ PO Cycle Error: {e}")
+        scan_and_process(master_drive, Config.ROOT_FOLDER_ID, process_po_invoice, po_results)
 
     # === CYCLE 2: NON-PO INVOICES ===
     if Config.NON_PO_FOLDER_ID:
         print(f"\n📂 Scanning Non-PO Folders (ID: {Config.NON_PO_FOLDER_ID})...")
-        try:
-            regions = master_drive.list_files(Config.NON_PO_FOLDER_ID, "application/vnd.google-apps.folder")
-            for region in regions:
-                sub = master_drive.list_files(region['id'], "application/vnd.google-apps.folder")
-                valid = [s for s in sub if parse_smart_date(s['name'])]
-                if not valid: continue
-                target = sorted(valid, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
-                
-                pdfs = master_drive.list_files(target['id'], "application/pdf")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-                    futures = [ex.submit(process_non_po_invoice, p, memory) for p in pdfs]
-                    for f in concurrent.futures.as_completed(futures):
-                        if res := f.result(): non_po_results.append(res)
-        except Exception as e:
-            print(f"❌ Non-PO Cycle Error: {e}")
+        scan_and_process(master_drive, Config.NON_PO_FOLDER_ID, process_non_po_invoice, non_po_results)
 
     # === REPORTING ===
-    
     if po_results:
         df_po = pd.DataFrame(po_results)
         cols_po = ['Document Date', 'Purchasing Doc. 1', 'Purchasing Doc. 2', 'Purchasing Doc. 3', 
@@ -353,9 +404,10 @@ def main():
         df_npo.insert(0, 'SL No', range(1, 1 + len(df_npo)))
         df_npo['SL No'] = df_npo['SL No'].astype(float)
 
+        # ADDED 'Document Link' TO COLUMNS
         cols_npo = ['SL No', 'Vendor No', 'Inv Date', 'Reference', 'Amount', 
                     'Amount in Doc.Currency (Item Wise)', 'Item text', 
-                    'Cost center', 'HSN/SAC', 'With Holding tax Base Amount']
+                    'Cost center', 'HSN/SAC', 'With Holding tax Base Amount', 'Document Link']
         
         df_npo = df_npo.reindex(columns=cols_npo)
         
