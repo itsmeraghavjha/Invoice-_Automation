@@ -43,6 +43,26 @@ def parse_filename_metadata(filename):
         return vendor, cost_center
     else:
         return clean_name, ""
+    
+
+def is_valid_po(po_str):
+    """Validates SAP PO numbers for HFL & HNL based on strict rules."""
+    if not po_str:
+        return False
+        
+    # Clean up any accidental whitespace or hidden characters
+    po_str = str(po_str).strip()
+    
+    # Rule 2: Must be exactly 10 digits
+    if not po_str.isdigit() or len(po_str) != 10:
+        return False
+        
+    # Rule 1: Range must be between 3300000000 and 8259999999
+    po_num = int(po_str)
+    if 3300000000 <= po_num <= 8259999999:
+        return True
+        
+    return False
 
 # --- WORKER: PO INVOICES ---
 def process_po_invoice(pdf_info):
@@ -66,9 +86,13 @@ def process_po_invoice(pdf_info):
         data = local_ai.process_file(temp_path) 
         if isinstance(data, list): data = data[0] if data else {}
 
+        # Extract raw POs
         pos = data.get('po_numbers', [])
         if isinstance(pos, str): pos = [pos]
         if not pos: pos = []
+
+        # 🔥 FILTER: Apply the strict validation rules
+        valid_pos = [po for po in pos if is_valid_po(po)]
 
         db = HistoryDB(Config.DB_FILE)
         db.log_success(pdf_info['id'])
@@ -76,9 +100,9 @@ def process_po_invoice(pdf_info):
         
         return {
             'Document Date': normalize_date(data.get('invoice_date')),
-            'PO numbers - PO1': pos[0] if len(pos)>0 else None,
-            'PO numbers - PO2': pos[1] if len(pos)>1 else None, 
-            'PO numbers - PO3': pos[2] if len(pos)>2 else None,
+            'PO numbers - PO1': valid_pos[0] if len(valid_pos)>0 else None,
+            'PO numbers - PO2': valid_pos[1] if len(valid_pos)>1 else None, 
+            'PO numbers - PO3': valid_pos[2] if len(valid_pos)>2 else None,
             'Reference': data.get('invoice_number'),
             'Document Header Test': data.get('first_line_item_description'),
             'Gross Value': data.get('gross_amount'),

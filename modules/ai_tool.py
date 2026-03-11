@@ -54,6 +54,21 @@ class InvoiceExtractor:
     def process_file(self, file_path):
         prompt = """
         Analyze this invoice and return a valid JSON object. 
+
+        CRITICAL RULES FOR 'po_numbers':
+        1. SAP Purchase Order numbers MUST be exactly 10 digits long.
+        2. Valid PO numbers strictly fall within the range of 3300000000 to 8259999999.
+        3. Do NOT extract Sales Orders (e.g., starting with 'SO' or 'DISSO').
+        4. EXCEPTION: Some vendors print the 10-digit SAP PO under the label "Reference No.". If a number is exactly 10 digits and in the valid range, ALWAYS extract it, regardless of the label. Only ignore SHORT (under 10 digits) reference numbers.
+        5. If no number matches these exact criteria, return an empty array [] for po_numbers.
+
+        CRITICAL RULES FOR 'invoice_number' (Reference):
+        1. This is the unique bill number provided by the vendor. Look for labels like "Invoice No", "Bill No", "Tax Invoice Number", or "Document No".
+        2. DO NOT extract the 15-character GSTIN (Goods and Services Tax Identification Number).
+        3. DO NOT extract the 10-character PAN (Permanent Account Number).
+        4. DO NOT extract the PO number, GRN (Goods Receipt Note), or Internal Order numbers as the invoice number.
+        5. It may contain slashes (/), hyphens (-), and financial year indicators (like 25-26).
+
         Required JSON Structure:
         {
             "invoice_number": "string",
@@ -70,6 +85,15 @@ class InvoiceExtractor:
     def process_non_po_file(self, file_path):
         prompt = """
         Analyze this Non-PO invoice and return a valid JSON object.
+
+        CRITICAL RULE FOR 'withholding_tax_base' (TDS):
+        1. Look for explicit TDS deductions ("Less TDS"). 
+        2. If TDS is NOT explicitly printed on the document (like in freight bills), extract the TAXABLE VALUE (the total amount before GST is applied) as the withholding_tax_base.
+        
+        CRITICAL RULE FOR 'invoice_number':
+        1. Do NOT extract GSTIN, PAN, or SAC codes as the invoice number.
+        2. Look for "Bill No", "Invoice No", or "L.R. No".
+
         Required JSON Structure:
         {
             "invoice_number": "string",
