@@ -53,21 +53,42 @@ class InvoiceExtractor:
 
     def process_file(self, file_path):
         prompt = """
-        Analyze this invoice and return a valid JSON object. 
+        Analyze this invoice and return a valid JSON object.
+
+        CRITICAL RULES FOR 'invoice_number':
+        1. Only extract from PRINTED text inside a clearly labeled field such as 
+        "Invoice No", "Invoice No.", "Bill No", "Tax Invoice Number", or "Document No".
+        2. IGNORE anything handwritten, stamped, or annotated on the document — 
+        regardless of where it appears (top, corners, margins, body). These are 
+        internal notes added by the recipient, not the vendor's invoice number.
+        3. The correct invoice number is always printed by the vendor inside a 
+        structured label/table/box on the document.
+        4. DO NOT extract GSTIN (15 chars), PAN (10 chars), PO numbers, GRN numbers, 
+        or any stamp/seal text.
+        5. May contain slashes (/), hyphens (-), or financial year indicators (e.g. 25-26).
 
         CRITICAL RULES FOR 'po_numbers':
-        1. SAP Purchase Order numbers MUST be exactly 10 digits long.
-        2. Valid PO numbers strictly fall within the range of 3300000000 to 8259999999.
-        3. Do NOT extract Sales Orders (e.g., starting with 'SO' or 'DISSO').
-        4. EXCEPTION: Some vendors print the 10-digit SAP PO under the label "Reference No.". If a number is exactly 10 digits and in the valid range, ALWAYS extract it, regardless of the label. Only ignore SHORT (under 10 digits) reference numbers.
-        5. If no number matches these exact criteria, return an empty array [] for po_numbers.
+        1. SAP PO numbers must be exactly 10 digits, in range 3300000000 to 8259999999.
+        2. Look across ALL labeled fields — including "Buyer's Order No.", "PO Number", 
+        "Reference No.", "Our Order No." — a valid 10-digit number in range is a PO 
+        regardless of its label.
+        3. IGNORE handwritten, stamped, or annotated numbers anywhere on the document.
+        4. DO NOT extract Sales Orders (prefixed with SO/DISSO) or any number outside 
+        the valid range or not exactly 10 digits.
+        5. If no valid PO found, return empty array [].
 
-        CRITICAL RULES FOR 'invoice_number' (Reference):
-        1. This is the unique bill number provided by the vendor. Look for labels like "Invoice No", "Bill No", "Tax Invoice Number", or "Document No".
-        2. DO NOT extract the 15-character GSTIN (Goods and Services Tax Identification Number).
-        3. DO NOT extract the 10-character PAN (Permanent Account Number).
-        4. DO NOT extract the PO number, GRN (Goods Receipt Note), or Internal Order numbers as the invoice number.
-        5. It may contain slashes (/), hyphens (-), and financial year indicators (like 25-26).
+        CRITICAL RULES FOR 'first_line_item_description':
+        1. Extract ONLY from the first numbered row (SI.No / Line / Sr.No = 1) in the 
+        line items table.
+        2. IGNORE any bold or plain text labels, category headers, or column group titles 
+        that appear above the numbered rows inside the description column — these are 
+        structural labels, not line items.
+        3. A description cell may span multiple lines — concatenate all lines belonging 
+        to that cell into a single space-separated string.
+        4. EXCLUDE any lines within the cell that are metadata key-value pairs, 
+        identifiable by a label followed by a colon (e.g. "Lot Number:", 
+        "Net Unit Wt:", "Batch No:", "Expiry Date:").
+        5. Return only the core product name and code. Max 150 characters.
 
         Required JSON Structure:
         {

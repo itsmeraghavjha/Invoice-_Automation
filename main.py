@@ -184,52 +184,130 @@ def process_non_po_invoice(pdf_info):
             except: pass
 
 # --- SMART SCANNER ---
+# def scan_and_process(drive_tool, root_id, worker_func, results_list):
+#     try:
+#         root_subs = drive_tool.list_files(root_id, "application/vnd.google-apps.folder")
+#         if not root_subs:
+#             print("     (Folder is empty)")
+#             return
+
+#         date_folders = [f for f in root_subs if parse_smart_date(f['name'])]
+#         targets = []
+        
+#         if date_folders:
+#             print(f"     👉 Detected Simple Structure (Found {len(date_folders)} date folders)")
+#             targets.append(sorted(date_folders, key=lambda x: parse_smart_date(x['name']), reverse=True)[0])
+#         else:
+#             print("     👉 Checking for Region Structure (e.g. Region -> Date Folder)...")
+#             for region in root_subs:
+#                 sub_subs = drive_tool.list_files(region['id'], "application/vnd.google-apps.folder")
+#                 valid_dates = [s for s in sub_subs if parse_smart_date(s['name'])]
+#                 if valid_dates:
+#                     best_sub = sorted(valid_dates, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
+#                     best_sub['name'] = f"{region['name']}/{best_sub['name']}"
+#                     targets.append(best_sub)
+
+#         if not targets:
+#             print("     ❌ No valid 'Month Year' folders found.")
+#             return
+
+#         for target in targets:
+#             print(f"     📍 Scanning: {target['name']}")
+#             pdfs = drive_tool.list_files(target['id'], "application/pdf")
+            
+#             if not pdfs:
+#                 print("        (No PDFs found)")
+#                 continue
+            
+#             # Reduced to 2 max workers to prevent Gemini API 400 errors
+#             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+#                 futures = [ex.submit(worker_func, p) for p in pdfs]
+#                 for f in concurrent.futures.as_completed(futures):
+#                     res = f.result()
+#                     if res:
+#                         # THIS is Step 3 automatically handled!
+#                         if isinstance(res, list):
+#                             results_list.extend(res) # Unpacks the multiple lines from Non-PO
+#                         else:
+#                             results_list.append(res) # Normal PO single line
+
+#     except Exception as e:
+#         print(f"❌ Scan Error: {e}")
+
+# --- SMART SCANNER ---
+# --- SMART SCANNER ---
 def scan_and_process(drive_tool, root_id, worker_func, results_list):
     try:
+        # 1. Look for all folders at the root level
         root_subs = drive_tool.list_files(root_id, "application/vnd.google-apps.folder")
         if not root_subs:
             print("     (Folder is empty)")
             return
 
-        date_folders = [f for f in root_subs if parse_smart_date(f['name'])]
         targets = []
         
+        # 2. Find Date folders at the root (if any stray ones exist like JAN-26)
+        date_folders = [f for f in root_subs if parse_smart_date(f['name'])]
         if date_folders:
-            print(f"     👉 Detected Simple Structure (Found {len(date_folders)} date folders)")
-            targets.append(sorted(date_folders, key=lambda x: parse_smart_date(x['name']), reverse=True)[0])
-        else:
-            print("     👉 Checking for Region Structure (e.g. Region -> Date Folder)...")
-            for region in root_subs:
+            latest_root_date = sorted(date_folders, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
+            targets.append(latest_root_date)
+
+        # 3. ALWAYS check the Region folders (folders that are NOT dates, like KSG REGION)
+        region_folders = [f for f in root_subs if not parse_smart_date(f['name'])]
+        if region_folders:
+            print("     👉 Checking Region folders...")
+            for region in region_folders:
                 sub_subs = drive_tool.list_files(region['id'], "application/vnd.google-apps.folder")
                 valid_dates = [s for s in sub_subs if parse_smart_date(s['name'])]
                 if valid_dates:
+                    # Grab the latest month folder inside this region
                     best_sub = sorted(valid_dates, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
+                    # Update name for clean logging
                     best_sub['name'] = f"{region['name']}/{best_sub['name']}"
                     targets.append(best_sub)
 
         if not targets:
-            print("     ❌ No valid 'Month Year' folders found.")
+            print("     ❌ No valid 'Month Year' folders found anywhere.")
             return
 
+        # Allowed subfolder names based on your exact Drive structure
+        allowed_subfolders = ["1. Capex", "2. Stock and Service PO's"]
+
         for target in targets:
-            print(f"     📍 Scanning: {target['name']}")
-            pdfs = drive_tool.list_files(target['id'], "application/pdf")
+            print(f"     📍 Scanning Month/Year Folder: {target['name']}")
             
-            if not pdfs:
-                print("        (No PDFs found)")
+            # Step 1: List all subfolders INSIDE the 'Month Year' folder
+            subfolders = drive_tool.list_files(target['id'], "application/vnd.google-apps.folder")
+            
+            # Step 2: Filter to strictly include only our allowed subfolders
+            target_subfolders = [
+                sf for sf in subfolders 
+                if sf['name'] in allowed_subfolders
+            ]
+
+            if not target_subfolders:
+                print(f"        (None of the target subfolders {allowed_subfolders} found in this month)")
                 continue
-            
-            # Reduced to 2 max workers to prevent Gemini API 400 errors
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                futures = [ex.submit(worker_func, p) for p in pdfs]
-                for f in concurrent.futures.as_completed(futures):
-                    res = f.result()
-                    if res:
-                        # THIS is Step 3 automatically handled!
-                        if isinstance(res, list):
-                            results_list.extend(res) # Unpacks the multiple lines from Non-PO
-                        else:
-                            results_list.append(res) # Normal PO single line
+
+            # Step 3: Loop through ONLY the allowed subfolders and pull their PDFs
+            for subfolder in target_subfolders:
+                print(f"        📂 Diving into Subfolder: {subfolder['name']}")
+                pdfs = drive_tool.list_files(subfolder['id'], "application/pdf")
+                
+                if not pdfs:
+                    print("           (No PDFs found here)")
+                    continue
+                
+                # Reduced to 2 max workers to prevent Gemini API 400 errors
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    futures = [ex.submit(worker_func, p) for p in pdfs]
+                    for f in concurrent.futures.as_completed(futures):
+                        res = f.result()
+                        if res:
+                            if isinstance(res, list):
+                                results_list.extend(res) # Unpacks the multiple lines from Non-PO
+                            else:
+                                results_list.append(res) # Normal PO single line
 
     except Exception as e:
         print(f"❌ Scan Error: {e}")
@@ -277,58 +355,79 @@ def main():
                    'Reference', 'Document Header Test', 'Gross Value', 'Net value', 'Status', 'URL']
         df_po = df_po.reindex(columns=cols_po)
         
-        # Determine Path
-        filename_po = f"PO_Invoices_{timestamp}.csv"
-        # Check if PO_STAGING_PATH exists in Config, else default to current directory
+        # Add an empty dummy column to force the trailing pipe in the Text file
+        df_po[''] = '' 
+        
+        # 1. Save TXT for Staging
+        filename_po_txt = f"PO_Invoices_{timestamp}.txt"
         staging_path_po = getattr(Config, 'PO_STAGING_PATH', None)
         
         if staging_path_po:
             os.makedirs(staging_path_po, exist_ok=True)
-            save_path_po = os.path.join(staging_path_po, filename_po)
-            df_po.to_csv(save_path_po, index=False)
-            print(f"✅ Saved PO Report to Staging: {save_path_po}")
+            save_path_po_txt = os.path.join(staging_path_po, filename_po_txt)
+            df_po.to_csv(save_path_po_txt, index=False, sep='|')
+            print(f"✅ Saved PO Text File to Staging: {save_path_po_txt}")
         else:
-            save_path_po = filename_po
-            df_po.to_csv(save_path_po, index=False)
-            print(f"⚠️ PO Staging Path not set. Saved locally as: {save_path_po}")
+            save_path_po_txt = filename_po_txt
+            df_po.to_csv(save_path_po_txt, index=False, sep='|')
+            print(f"⚠️ PO Staging Path not set. Saved locally as: {save_path_po_txt}")
 
-        try: email.send_report(save_path_po, len(po_results))
-        except: pass
+        # 2. Create Excel file for Email (drop the empty dummy column so it looks clean)
+        filename_po_excel = f"PO_Invoices_{timestamp}.xlsx"
+        df_po_email = df_po.drop(columns=[''])
+        df_po_email.to_excel(filename_po_excel, index=False)
 
-        if not staging_path_po and os.path.exists(save_path_po):
-            os.remove(save_path_po)
+        try: 
+            email.send_report(filename_po_excel, len(po_results))
+        except: 
+            pass
+
+        # 3. Cleanup temporary files
+        if os.path.exists(filename_po_excel):
+            os.remove(filename_po_excel) # Always delete the temp Excel file
+        if not staging_path_po and os.path.exists(save_path_po_txt):
+            os.remove(save_path_po_txt)
 
     # --- NON-PO REPORT ---
     if non_po_results:
-        # THIS is Step 4 automatically handled!
         df_npo = pd.DataFrame(non_po_results)
-        
-        # Exact headers matching your new CSV requirements
         cols_npo = ['Document Date', 'Invoice No', 'Vendor Code', 'Gross Amount', 
                     'Plant', 'Header Text', 'Line Item No', 'Item Test', 
                     'Item Gross Value', 'HSN Code', 'WT Amt', 'URL Path']
-        
         df_npo = df_npo.reindex(columns=cols_npo)
         
-        # Determine Path
-        filename_npo = f"NonPO_Invoices_{timestamp}.csv"
+        # Add an empty dummy column to force the trailing pipe in the Text file
+        df_npo[''] = ''
+        
+        # 1. Save TXT for Staging
+        filename_npo_txt = f"NonPO_Invoices_{timestamp}.txt"
         staging_path_npo = getattr(Config, 'NON_PO_STAGING_PATH', None)
 
         if staging_path_npo:
             os.makedirs(staging_path_npo, exist_ok=True)
-            save_path_npo = os.path.join(staging_path_npo, filename_npo)
-            df_npo.to_csv(save_path_npo, index=False)
-            print(f"✅ Saved Non-PO Report to Staging: {save_path_npo}")
+            save_path_npo_txt = os.path.join(staging_path_npo, filename_npo_txt)
+            df_npo.to_csv(save_path_npo_txt, index=False, sep='|')
+            print(f"✅ Saved Non-PO Text File to Staging: {save_path_npo_txt}")
         else:
-            save_path_npo = filename_npo
-            df_npo.to_csv(save_path_npo, index=False)
-            print(f"⚠️ Non-PO Staging Path not set. Saved locally as: {save_path_npo}")
+            save_path_npo_txt = filename_npo_txt
+            df_npo.to_csv(save_path_npo_txt, index=False, sep='|')
+            print(f"⚠️ Non-PO Staging Path not set. Saved locally as: {save_path_npo_txt}")
 
-        try: email.send_report(save_path_npo, len(non_po_results))
-        except: pass
+        # 2. Create Excel file for Email (drop the empty dummy column)
+        filename_npo_excel = f"NonPO_Invoices_{timestamp}.xlsx"
+        df_npo_email = df_npo.drop(columns=[''])
+        df_npo_email.to_excel(filename_npo_excel, index=False)
 
-        if not staging_path_npo and os.path.exists(save_path_npo):
-            os.remove(save_path_npo)
+        try: 
+            email.send_report(filename_npo_excel, len(non_po_results))
+        except: 
+            pass
+
+        # 3. Cleanup temporary files
+        if os.path.exists(filename_npo_excel):
+            os.remove(filename_npo_excel)
+        if not staging_path_npo and os.path.exists(save_path_npo_txt):
+            os.remove(save_path_npo_txt)
 
     if not po_results and not non_po_results:
         print("✅ No new invoices found.")
