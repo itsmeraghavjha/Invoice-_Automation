@@ -93,7 +93,7 @@ class InvoiceExtractor:
         Required JSON Structure:
         {
             "invoice_number": "string",
-            "invoice_date": "string",
+            "invoice_date": "string (Strictly in DD.MM.YYYY format. Correct obvious OCR errors)",
             "po_numbers": ["string"],
             "vendor_name": "string",
             "first_line_item_description": "string",
@@ -118,7 +118,7 @@ class InvoiceExtractor:
         Required JSON Structure:
         {
             "invoice_number": "string",
-            "invoice_date": "string",
+            "invoice_date": "string (Strictly in DD.MM.YYYY format. Correct obvious OCR errors)",
             "header_text": "string",
             "withholding_tax_base": number,
             "gross_amount": number,
