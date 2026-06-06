@@ -64,6 +64,12 @@ def is_valid_po(po_str):
         
     return False
 
+def sanitize_pipe(value, replacement=':'):
+    """Replace pipe characters within field values to avoid delimiter conflicts."""
+    if isinstance(value, str):
+        return value.replace('|', replacement)
+    return value
+
 # --- WORKER: PO INVOICES ---
 def process_po_invoice(pdf_info):
     db = HistoryDB(Config.DB_FILE)
@@ -361,6 +367,8 @@ def main():
         # 1. Save TXT for Staging
         filename_po_txt = f"PO_Invoices_{timestamp}.txt"
         staging_path_po = getattr(Config, 'PO_STAGING_PATH', None)
+
+        df_po = df_po.map(sanitize_pipe)  
         
         if staging_path_po:
             os.makedirs(staging_path_po, exist_ok=True)
@@ -402,6 +410,8 @@ def main():
         # 1. Save TXT for Staging
         filename_npo_txt = f"NonPO_Invoices_{timestamp}.txt"
         staging_path_npo = getattr(Config, 'NON_PO_STAGING_PATH', None)
+
+        df_npo = df_npo.map(sanitize_pipe)
 
         if staging_path_npo:
             os.makedirs(staging_path_npo, exist_ok=True)
